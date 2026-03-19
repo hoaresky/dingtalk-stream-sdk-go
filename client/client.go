@@ -143,13 +143,15 @@ func (cli *StreamClient) processLoop() {
 
 	readChan := make(chan []byte)
 	pongChan := make(chan struct{})
-	closeChan := make(chan struct{})
-	defer func() { close(closeChan) }()
-	defer func() { close(pongChan) }()
-	defer func() { close(readChan) }()
+	closeChan := make(chan struct{}, 1)
+	done := make(chan struct{})
+	defer close(done)
 
 	cli.conn.SetPongHandler(func(appData string) error {
-		pongChan <- struct{}{}
+		select {
+		case pongChan <- struct{}{}:
+		case <-done:
+		}
 		return nil
 	})
 	//开始启动协程读数据
@@ -158,11 +160,18 @@ func (cli *StreamClient) processLoop() {
 			messageType, message, err := cli.conn.ReadMessage()
 			if err != nil {
 				logger.GetLogger().Errorf("connection process read message error: messageType=[%d] message=[%s] error=[%s]", messageType, string(message), err)
-				closeChan <- struct{}{}
+				select {
+				case closeChan <- struct{}{}:
+				case <-done:
+				}
 				return
 			}
 			if messageType == websocket.TextMessage {
-				readChan <- message
+				select {
+				case readChan <- message:
+				case <-done:
+					return
+				}
 			}
 		}
 	}()
@@ -191,7 +200,12 @@ func (cli *StreamClient) processLoop() {
 					return
 				case <-time.After(5 * time.Second):
 					logger.GetLogger().Errorf("ping time out, connection is closing")
-					closeChan <- struct{}{}
+					select {
+					case closeChan <- struct{}{}:
+					case <-done:
+					}
+					return
+				case <-done:
 					return
 				}
 			}()
